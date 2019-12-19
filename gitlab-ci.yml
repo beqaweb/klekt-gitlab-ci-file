@@ -1,0 +1,215 @@
+variables:
+  PROJECT_ID: '890'
+  APP_NAME: 'com.presentedby.app'
+
+cache:
+  paths:
+    - ./node_modules
+
+stages:
+  - test
+  - bundle-js
+  - build
+
+test:
+  stage: test
+  image: node:12
+  tags:
+    - docker
+  allow_failure: false
+  interruptible: true
+  before_script:
+    - rm -rf ./node_modules/*/.git
+    - npm ci --unsafe-perm
+  script:
+    - npm run env-config-setup APP_DEFAULT_ENV_NAME=STAGE APP_BUILD_CONFIG=Debug
+    - npm run lint
+    - npm run test
+  after_script:
+    - rm -f ./environment.config.json
+
+.bundle_js_template: &bundle_js_template
+  stage: bundle-js
+  image: node:12
+  tags:
+    - docker
+  allow_failure: false
+  before_script:
+    - rm -rf ./node_modules/*/.git
+    - npm ci --unsafe-perm
+  only:
+    - master
+    - dev
+  when: manual
+
+bundle_js:Beta:Test:
+  <<: *bundle_js_template
+  variables:
+    BUNDLE_PATH_ANDROID: ./android/app/build/generated/assets/react/releaseBeta
+    BUNDLE_PATH_IOS: ./ios
+  script:
+    - npm run env-config-setup APP_BUILD_CONFIG=Beta APP_DEFAULT_ENV_NAME=TEST
+    - npm run bundle-js:ios -- --bundle-output $BUNDLE_PATH_IOS/main.jsbundle
+    - |
+      mkdir -p $BUNDLE_PATH_ANDROID
+      npm run bundle-js:android -- --bundle-output $BUNDLE_PATH_ANDROID/index.android.bundle
+  artifacts:
+    name: '$CI_JOB_NAME'
+    paths:
+      - $BUNDLE_PATH_IOS/main.jsbundle
+      - $BUNDLE_PATH_ANDROID/index.android.bundle
+      - ./environment.config.json
+
+bundle_js:Release:Test:
+  <<: *bundle_js_template
+  variables:
+    BUNDLE_PATH_ANDROID: ./android/app/build/generated/assets/react/release
+    BUNDLE_PATH_IOS: ./ios
+  script:
+    - npm run env-config-setup APP_BUILD_CONFIG=Release APP_DEFAULT_ENV_NAME=TEST
+    - npm run bundle-js:ios -- --bundle-output $BUNDLE_PATH_IOS/main.jsbundle
+    - |
+      mkdir -p $BUNDLE_PATH_ANDROID
+      npm run bundle-js:android -- --bundle-output $BUNDLE_PATH_ANDROID/index.android.bundle
+  artifacts:
+    name: '$CI_JOB_NAME'
+    paths:
+      - $BUNDLE_PATH_IOS/main.jsbundle
+      - $BUNDLE_PATH_ANDROID/index.android.bundle
+      - ./environment.config.json
+
+bundle_js:Release:Live:
+  <<: *bundle_js_template
+  variables:
+    BUNDLE_PATH_ANDROID: ./android/app/build/generated/assets/react/release
+    BUNDLE_PATH_IOS: ./ios
+  script:
+    - npm run env-config-setup APP_BUILD_CONFIG=Release APP_DEFAULT_ENV_NAME=LIVE
+    - npm run bundle-js:ios -- --bundle-output $BUNDLE_PATH_IOS/main.jsbundle
+    - |
+      mkdir -p $BUNDLE_PATH_ANDROID
+      npm run bundle-js:android -- --bundle-output $BUNDLE_PATH_ANDROID/index.android.bundle
+  artifacts:
+    name: '$CI_JOB_NAME'
+    paths:
+      - $BUNDLE_PATH_IOS/main.jsbundle
+      - $BUNDLE_PATH_ANDROID/index.android.bundle
+      - ./environment.config.json
+
+.ios_template: &ios_template
+  cache:
+    paths:
+      - ./ios/Pods
+      - ./ios/vendor
+  tags:
+    - ios
+  allow_failure: false
+  stage: build
+  variables:
+    KEYCHAIN_NAME: 'klekt-keys'
+    KEYCHAIN_PASSWORD: '$CI_COMMIT_REF_SLUG'
+    MATCH_KEYCHAIN_NAME: 'klekt-keys'
+    MATCH_KEYCHAIN_PASSWORD: '$CI_COMMIT_REF_SLUG'
+  before_script:
+    - cd ./ios; bundle install --deployment; cd ..
+  after_script:
+    - rm -f ./environment.config.json
+  only:
+    - master
+    - dev
+  when: manual
+
+iOS:Beta:Test:TestbuildRocks:
+  <<: *ios_template
+  script:
+    - |
+      cd ./ios
+      ls -lsa
+      bundle exec fastlane ios build_beta
+    - upload-ipa --ipa "./build/KLEKT.ipa"
+  needs: ['test', 'bundle_js:Beta:Test']
+  dependencies:
+    - bundle_js:Beta:Test
+
+iOS:Release:Test:Testflight:
+  <<: *ios_template
+  script:
+    - |
+      cd ./ios
+      bundle exec fastlane ios build_testflight
+    - create-release
+  needs: ['test', 'bundle_js:Release:Test']
+  dependencies:
+    - bundle_js:Release:Test
+
+iOS:Release:Live:Testflight:
+  <<: *ios_template
+  script:
+    - |
+      cd ./ios
+      bundle exec fastlane ios build_testflight
+    - create-release
+  needs: ['test', 'bundle_js:Release:Live']
+  dependencies:
+    - bundle_js:Release:Live
+
+.android_template: &android_template
+  image: ekreative/android
+  stage: build
+  tags:
+    - docker
+  allow_failure: false
+  cache:
+    paths:
+      - ./android/.gradle
+  variables:
+    GRADLE_USER_HOME: './android/.gradle'
+  before_script:
+    - rm -rf ./node_modules/*/.git
+    - npm ci --unsafe-perm
+    - cp $ANDROID_GPLAY_CONSOLE_API_KEY_JSON $ANDROID_GPLAY_CONSOLE_API_KEY_JSON.json
+    - touch ./android/keystore.properties
+    - |
+      cat <<EoF > ./android/keystore.properties
+      keyAlias=$ANDROID_KEY_ALIAS
+      keystorePassword=$ANDROID_KEYSTORE_PASSWORD
+      keyPassword=$ANDROID_KEY_PASSWORD
+      googlePlayConsoleApiKeyJsonFilePath=$ANDROID_GPLAY_CONSOLE_API_KEY_JSON.json
+      EoF
+  after_script:
+    - rm -f $ANDROID_GPLAY_CONSOLE_API_KEY_JSON.json
+  only:
+    - master
+    - dev
+  when: manual
+
+Android:Beta:Test:TestbuildRocks:
+  <<: *android_template
+  script:
+    - |
+      cd ./android
+      ./gradlew assembleReleaseBeta -x bundleReleaseBetaJsAndAssets --stacktrace --info
+    - upload-apk --apk "./app/build/outputs/apk/releaseBeta/app-releaseBeta.apk"
+  needs: ['test', 'bundle_js:Beta:Test']
+  dependencies:
+    - bundle_js:Beta:Test
+
+Android:Release:Test:InternalBeta:
+  <<: *android_template
+  script:
+    - |
+      cd ./android
+      ./gradlew publishReleaseBundle -x bundleReleaseJsAndAssets --stacktrace --info
+  needs: ['test', 'bundle_js:Release:Test']
+  dependencies:
+    - bundle_js:Release:Test
+
+Android:Release:Live:InternalBeta:
+  <<: *android_template
+  script:
+    - |
+      cd ./android
+      ./gradlew publishReleaseBundle -x bundleReleaseJsAndAssets --stacktrace --info
+  needs: ['test', 'bundle_js:Release:Live']
+  dependencies:
+    - bundle_js:Release:Live
